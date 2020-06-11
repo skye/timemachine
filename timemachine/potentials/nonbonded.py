@@ -33,6 +33,9 @@ def nonbonded(
 
     return lj - lj_exc + es
 
+    # return es
+    # return lj_xc
+
 
 
 def lennard_jones(conf, params, box, param_idxs, cutoff):
@@ -149,7 +152,6 @@ def lennard_jones_exclusion(conf, params, box, param_idxs, cutoff, exclusions, e
     # the exclusion energy is not divided by two.
     return np.sum(eij_exc)
 
-
 def simple_energy(conf, params, box, param_idxs, cutoff, exclusions, exclusion_scale_idxs):
     """
     Numerically stable implementation of the pairwise term:
@@ -196,12 +198,11 @@ def simple_energy(conf, params, box, param_idxs, cutoff, exclusions, exclusion_s
     eij_exc = scale_ij*qij/dij
 
     if cutoff is not None:
-        # sw = switch_fn(dij, cutoff)
-        # eij_exc = eij_exc*sw
         eij_exc = np.where(dij > cutoff, np.zeros_like(eij_exc), eij_exc)
         eij_exc = np.where(src_idxs == dst_idxs, np.zeros_like(eij_exc), eij_exc)
 
     return np.sum(eij/2) - np.sum(eij_exc)
+
 
 
 def pairwise_energy(conf, box, charges, cutoff):

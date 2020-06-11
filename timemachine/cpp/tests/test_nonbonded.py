@@ -81,10 +81,6 @@ class TestNonbonded(GradientTest):
                     dtype=np.int32
                 )*2 # put everything at 2*Cutoff intervals
 
-                print(lambda_plane_idxs)
-
-                # assert 0
-
                 lambda_offset_idxs = np.random.randint(
                     low=0,
                     high=2,

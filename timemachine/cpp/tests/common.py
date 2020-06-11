@@ -10,6 +10,7 @@ from timemachine.lib import ops, custom_ops
 
 from hilbertcurve.hilbertcurve import HilbertCurve
 
+import time
 
 def prepare_gbsa_system(
     x,
@@ -150,7 +151,6 @@ def prepare_nonbonded_system(
     lj_sig_params = np.random.rand(P_lj)/p_scale # we want these to be pretty small for numerical stability
     lj_sig_idxs = np.random.randint(low=0, high=P_lj, size=(N,), dtype=np.int32) + len(params)
     params = np.concatenate([params, lj_sig_params])
-
 
     lj_eps_params = np.random.rand(P_lj)
     lj_eps_idxs = np.random.randint(low=0, high=P_lj, size=(N,), dtype=np.int32) + len(params)
@@ -323,7 +323,7 @@ class GradientTest(unittest.TestCase):
 
         errors = np.abs(errors) > rtol
 
-        print("max relative error", max_error, "rtol", rtol, norms[max_error_arg], "mean error", mean_error, "std error", std_error)
+        # print("max relative error", max_error, "rtol", rtol, norms[max_error_arg], "mean error", mean_error, "std error", std_error)
         if np.sum(errors) > 0:
             print("FATAL: max relative error", max_error, truth[max_error_arg], test[max_error_arg])
             assert 0
@@ -345,76 +345,122 @@ class GradientTest(unittest.TestCase):
         assert x.dtype == np.float64
         assert params.dtype == np.float64
 
+
+        # time custom forces
+
         ref_nrg = ref_nrg_fn(x, params, lamb)
         grad_fn = jax.grad(ref_nrg_fn, argnums=(0, 1, 2))
-        ref_dx, ref_dp, ref_dl = grad_fn(x, params, lamb)
-        test_dx, test_dl, test_nrg = custom_force.execute_lambda(x, params, lamb)
 
-        np.testing.assert_allclose(ref_nrg, test_nrg, rtol)
+        count = 100
 
-        self.assert_equal_vectors(
-            np.array(ref_dx),
-            np.array(test_dx),
-            rtol,
-        )
+        start = time.time()
+        for _ in range(count):
+            test_dx, test_dl, test_nrg = custom_force.execute_lambda(x, params, lamb)
+        end = time.time()
+        print("custom force time:", (end-start)/count)
 
-        if ref_dl == 0:
-            np.testing.assert_almost_equal(ref_dl, test_dl, 1e-5)
-        else:
-            np.testing.assert_allclose(ref_dl, test_dl, rtol)
-
-        # return
 
         x_tangent = np.random.rand(N, D).astype(np.float64)
         params_tangent = np.zeros_like(params)
         lamb_tangent = np.random.rand()
 
+        start = time.time()
+        for _ in range(count):
+            test_x_tangent, test_p_tangent, test_x_primal, test_p_primal = custom_force.execute_lambda_jvp(
+                x,
+                params,
+                lamb,
+                x_tangent,
+                params_tangent,
+                lamb_tangent
+            )
 
-        test_x_tangent, test_p_tangent, test_x_primal, test_p_primal = custom_force.execute_lambda_jvp(
-            x,
-            params,
-            lamb,
-            x_tangent,
-            params_tangent,
-            lamb_tangent
-        )
+        end = time.time()
+        print("custom force jvp time:", (end-start)/count)
 
-        primals = (x, params, lamb)
-        tangents = (x_tangent, params_tangent, lamb_tangent)
+        # test jax backends
 
-        _, t = jax.jvp(grad_fn, primals, tangents)
+        for backend in [None, "cpu", "gpu"]:
 
-        ref_p_tangent = t[1]
+            print("testing jit backend:", backend)
+            if backend is None:
+                jit_grad_fn = grad_fn
+            else:
+                jit_grad_fn = jax.jit(grad_fn, backend=backend)
 
-        self.assert_equal_vectors(
-            t[0],
-            test_x_tangent,
-            rtol,
-        )
+            # dummy to induce compiler
+            ref_dx, ref_dp, ref_dl = jit_grad_fn(x, params, lamb)
 
-        # TBD compare relative to the *norm* of the group of similar derivatives.
-        # for r_idx, (r, tt) in enumerate(zip(t[1], test_p_tangent)):
-        #     err = abs((r - tt)/r)
-        #     if err > 1e-4:
-        #         print(r_idx, err, r, tt)
+            start = time.time()
+            for _ in range(count):
+                ref_dx, ref_dp, ref_dl = jit_grad_fn(x, params, lamb)
+            end = time.time()
 
-        # print(ref_p_tangent)
-        # print(test_p_tangent)
-        # print(np.abs(ref_p_tangent - test_p_tangent))
 
-        if precision == np.float64:
-            
-            print(np.amax(ref_p_tangent - test_p_tangent), np.amin(ref_p_tangent - test_p_tangent))
+            print("jax time:", (end-start)/count)
 
-            for a, b in zip(ref_p_tangent, test_p_tangent):
-                try:
-                    np.testing.assert_allclose(a, b, rtol=1e-8)
-                except:
-                    print("FUCKED", a, b)
-                    assert 0
+            test_dx, test_dl, test_nrg = custom_force.execute_lambda(x, params, lamb)
 
-            np.testing.assert_allclose(ref_p_tangent, test_p_tangent, rtol=rtol)
+            np.testing.assert_allclose(ref_nrg, test_nrg, rtol)
 
-        else:
-            self.assert_param_derivs(ref_p_tangent, test_p_tangent)
+            self.assert_equal_vectors(
+                np.array(ref_dx),
+                np.array(test_dx),
+                rtol,
+            )
+
+            if ref_dl == 0:
+                np.testing.assert_almost_equal(ref_dl, test_dl, 1e-5)
+            else:
+                np.testing.assert_allclose(ref_dl, test_dl, rtol)
+
+            primals = (x, params, lamb)
+            tangents = (x_tangent, params_tangent, lamb_tangent)
+
+            if backend is None:
+                jit_jvp_fn = functools.partial(jax.jvp, grad_fn)
+            else:
+                jit_jvp_fn = jax.jit(functools.partial(jax.jvp, grad_fn))
+
+            # dummy to induce compiler
+            _, t = jit_jvp_fn(primals, tangents)
+
+            start = time.time()
+            for _ in range(count):
+                _, t = jit_jvp_fn(primals, tangents)
+            end = time.time()
+
+            print("jax jvp time:", (end-start)/count)
+
+            ref_p_tangent = t[1]
+
+            self.assert_equal_vectors(
+                t[0],
+                test_x_tangent,
+                rtol,
+            )
+
+            # TBD compare relative to the *norm* of the group of similar derivatives.
+            # for r_idx, (r, tt) in enumerate(zip(t[1], test_p_tangent)):
+            #     err = abs((r - tt)/r)
+            #     if err > 1e-4:
+            #         print(r_idx, err, r, tt)
+
+            # print(ref_p_tangent)
+            # print(test_p_tangent)
+            # print(np.abs(ref_p_tangent - test_p_tangent))
+
+            if precision == np.float64:
+                
+                for a, b in zip(ref_p_tangent, test_p_tangent):
+                    try:
+                        np.testing.assert_allclose(a, b, rtol=1e-8)
+                    except:
+                        print("parameter derivatives failed", a, b)
+                        assert 0
+
+                np.testing.assert_allclose(ref_p_tangent, test_p_tangent, rtol=rtol)
+
+            else:
+                self.assert_param_derivs(ref_p_tangent, test_p_tangent)
 
